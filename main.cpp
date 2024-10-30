@@ -9,7 +9,7 @@
 #define BUFFER_SIZE 64 * 1024
 
 using namespace std;
-using namespace std::filesystem;
+using namespace filesystem;
 
 struct TreeEntry
 {
@@ -326,7 +326,7 @@ string writeBlob(path &filepath)
     return sha;
 }
 
-int writeObject(string &object)
+int writeObject(string &object, string objtype)
 {
     string hash = hashBlob(object);
     // cout << "tree hash: " << hash << " dirpath: " << dirpath << '\n';
@@ -335,7 +335,7 @@ int writeObject(string &object)
 
     objPath += "/" + hash.substr(2);
     ofstream opFile(objPath, ios::binary);
-    string header = "tree " + to_string(object.size()) + '\0';
+    string header = objtype + " " + to_string(object.size()) + '\0';
     string fullobj = header + object;
 
     z_stream deflateStream;
@@ -411,7 +411,7 @@ string writeTree(path directoryPath)
         treeData += entry;
     }
 
-    writeObject(treeData);
+    writeObject(treeData, "tree");
     return hashBlob(treeData);
 }
 
@@ -462,6 +462,38 @@ string decompressData(const string &compressedData)
     inflateEnd(&inflateStream);
     return decompressedData;
 }
+string decompressFile(string tree_sha)
+{
+    string dir = tree_sha.substr(0, 2);
+    string file = tree_sha.substr(2);
+    string objPath = ".mygit/objects/" + dir + '/' + file;
+    ifstream inFile(objPath, ios::binary);
+    if (!inFile)
+    {
+        cerr << "Tree object not foundxxx" << tree_sha << "\n";
+        return "";
+    }
+
+    stringstream buffer;
+    buffer << inFile.rdbuf();
+    string compressedData = buffer.str();
+
+    string treeData = decompressData(compressedData);
+    return treeData;
+}
+
+string extractTreeSHA(const string &commitObject)
+{
+    istringstream ss(commitObject);
+    string header, userName, userEmail, treeSHA;
+
+    getline(ss, header, '\0');
+    getline(ss, userName, '\0');
+    getline(ss, userEmail, '\0');
+    getline(ss, treeSHA, '\0');
+    return treeSHA;
+}
+
 unordered_map<string, TreeEntry> parseTreeDataMap(string treeData)
 {
     unordered_map<string, TreeEntry> newTreeMap;
@@ -474,7 +506,7 @@ unordered_map<string, TreeEntry> parseTreeDataMap(string treeData)
     ss.clear();
     if (objtype != "tree")
     {
-        cout << "Not a tree object\n";
+        cout << "Not a tree objectxxx " << treeData << "\n";
         return newTreeMap;
     }
 
@@ -493,6 +525,8 @@ unordered_map<string, TreeEntry> parseTreeDataMap(string treeData)
         pos += 40;
         entry.filetype = (entry.filemod == "100644" ? "blob" : "tree");
         newTreeMap[entry.filename] = entry;
+        cout << "entry: " << entry.filename << '\n'
+             << entry.filehash << '\n';
     }
     return newTreeMap;
 }
@@ -509,7 +543,7 @@ vector<TreeEntry> parseTreeData(string treeData)
     ss.clear();
     if (objtype != "tree")
     {
-        cout << "Not a tree object\n";
+        cout << "Not a tree objectyyy " << treeData << "\n ";
         return entries;
     }
 
@@ -553,7 +587,7 @@ void displayTree(vector<TreeEntry> &entries, bool nameonly)
     }
 }
 
-unordered_map<string, TreeEntry> getTreeData(string tree_sha)
+string getObjData(string tree_sha)
 {
     string dir = tree_sha.substr(0, 2);
     string file = tree_sha.substr(2);
@@ -561,15 +595,20 @@ unordered_map<string, TreeEntry> getTreeData(string tree_sha)
     ifstream inFile(objPath, ios::binary);
     if (!inFile)
     {
-        cerr << "Tree object not found\n";
+        cerr << "Tree object not foundyyyy" << tree_sha << "\n";
         return {};
     }
 
     stringstream buffer;
     buffer << inFile.rdbuf();
     string compressedData = buffer.str();
-
     string treeData = decompressData(compressedData);
+    return treeData;
+}
+
+unordered_map<string, TreeEntry> getTreeData(string tree_sha)
+{
+    string treeData = getObjData(tree_sha);
     if (treeData.empty())
     {
         cerr << "ERR: Failed to decompress tree object\n";
@@ -587,7 +626,7 @@ int lstree(string tree_sha, bool nameonly)
     ifstream inFile(objPath, ios::binary);
     if (!inFile)
     {
-        cerr << "Tree object not found\n";
+        cerr << "Tree object not foundzzzzz" << tree_sha << "\n";
         return 1;
     }
 
@@ -687,10 +726,10 @@ void add(vector<string> &files)
             cerr << "ERR: File not found " << file << '\n';
             continue;
         }
-
-        detecteDeletions(indexEntries);
-        saveIndex(indexEntries);
     }
+
+    detecteDeletions(indexEntries);
+    saveIndex(indexEntries);
 
     ofstream indexFileOut(".mygit/index", ios::trunc);
     for (const auto &[filepath, Metadata] : indexEntries)
@@ -719,7 +758,7 @@ unordered_map<string, string> updateTree(unordered_map<string, TreeEntry> &entri
     if (!indexFile)
     {
         cerr << "ERR: Index file does not exist\n";
-        return;
+        return {};
     }
     string line;
     while (getline(indexFile, line))
@@ -745,15 +784,33 @@ unordered_map<string, string> updateTree(unordered_map<string, TreeEntry> &entri
     return updated_treedata;
 }
 
+// string getCurrentTimestamp()
+// {
+//     time_t t = time(nullptr);
+//     char buf[100];
+//     strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", localtime(&t));
+//     return buf;
+// }
+
 string getCurrentTimestamp()
 {
     time_t t = time(nullptr);
+    struct tm *localTime = localtime(&t);
+
     char buf[100];
-    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", localtime(&t));
-    return buf;
+    strftime(buf, sizeof(buf), "%a %b %d %H:%M:%S %Y", localTime);
+
+    // Get the timezone offset in hours and minutes
+    int offset = static_cast<int>(localTime->tm_gmtoff / 60);
+    char timezone[6];
+    snprintf(timezone, sizeof(timezone), "%+03d%02d", offset / 60, abs(offset % 60));
+
+    ostringstream oss;
+    oss << buf << " " << timezone;
+    return oss.str();
 }
 
-void commit(string &message)
+string commit(string &message)
 {
     ifstream headFile(".mygit/HEAD");
     string branchRef;
@@ -770,20 +827,31 @@ void commit(string &message)
         branchRef = branchRef.substr(5);
     }
     headFile.close();
-
     bool isFirstCommit = !exists(".mygit/" + branchRef);
     string treesha, parentSHA;
     if (isFirstCommit)
     {
+        // todo: avoid unstaged files
         treesha = writeTree(current_path());
+        create_directories(".mygit/refs/heads");
     }
     else
     {
         ifstream branchFile(".mygit/" + branchRef);
         getline(branchFile, parentSHA);
-        cout << "tressha " << parentSHA;
-        unordered_map<string, TreeEntry> entries = getTreeData(parentSHA);
+        string commit_data = getObjData(parentSHA);
+        // cout << "parent commit data " << commit_data << '\n';
+        string parenttree = extractTreeSHA(commit_data);
+        unordered_map<string, TreeEntry> entries = getTreeData(parenttree);
+        for (auto &[name, detail] : entries)
+        {
+            cout << "name: " << name << "  " << detail.filehash << "\n";
+        }
         unordered_map<string, string> updatedTreeData = updateTree(entries);
+        for (auto &[name, detail] : updatedTreeData)
+        {
+            cout << "name: " << name << "  " << detail << "\n";
+        }
 
         string treeData;
         for (auto &[file, entrydata] : updatedTreeData)
@@ -791,16 +859,70 @@ void commit(string &message)
             treeData += entrydata;
         }
 
-        writeObject(treeData);
+        writeObject(treeData, "tree");
         treesha = hashBlob(treeData);
     }
     string timestamp = getCurrentTimestamp();
-    cout << "tressha " << treesha;
     string commitData = user.name + '\0' +
                         user.email + '\0' + treesha + '\0' +
                         parentSHA + '\0' +
                         timestamp + '\0' +
                         message;
+
+    writeObject(commitData, "commit");
+    string commitSha = hashBlob(commitData);
+    ofstream refFile(".mygit/" + branchRef, ios::trunc);
+    refFile << commitSha;
+    refFile.close();
+    return commitSha;
+}
+
+string extractlog(string &commitData, string &commitsha)
+{
+
+    istringstream ss(commitData);
+    string header;
+    getline(ss, header, '\0');
+    string type;
+    stringstream strstr(header);
+    strstr >> type;
+    if (type != "commit")
+    {
+        cout << "Not a commit object\n";
+        return "";
+    }
+
+    string userName, userEmail, treeSHA, parentsha;
+    string timestamp, message;
+    getline(ss, userName, '\0');
+    getline(ss, userEmail, '\0');
+    getline(ss, treeSHA, '\0');
+    getline(ss, parentsha, '\0');
+    getline(ss, timestamp, '\0');
+    getline(ss, message, '\0');
+    cout << "commit " << commitsha << '\n';
+    cout << "Author: " << userName << " " << "<" << userEmail << ">\n";
+    cout << "Date:   " << timestamp << '\n';
+    cout << "parentsha: " << parentsha << '\n';
+
+    cout << "\t" << message << "\n\n";
+    return parentsha;
+}
+
+void displaycommit(string &commitsha)
+{
+    string parentsha = commitsha;
+    do
+    {
+        string commitData = getObjData(parentsha);
+        // cout << "Data: " << commitData;
+        parentsha = extractlog(commitData, parentsha);
+    } while (!parentsha.empty());
+}
+void checkout(string &commitsha)
+{
+    string commitData = getObjData(commitsha);
+    cout << "Data: " << commitData << '\n';
 }
 
 int main(int argc, char *argv[])
@@ -909,11 +1031,56 @@ int main(int argc, char *argv[])
     else if (command == "commit")
     {
         string message = "Default commit message";
-        if (strcmp(argv[2], "-m") == 0)
+        if (argc > 2 && strcmp(argv[2], "-m") == 0)
         {
             message = argv[3];
         }
-        commit(message);
+        string sha = commit(message);
+        cout << sha << '\n';
+    }
+    else if (command == "log")
+    {
+        if (argc > 2)
+        {
+            cout << "ERR: Too many arguments\n";
+            return 1;
+        }
+
+        ifstream headFile(".mygit/HEAD");
+        string branchRef;
+        if (!headFile)
+        {
+            cerr << "ERR: HEAD file not found\n";
+            return 1;
+        }
+        getline(headFile, branchRef);
+        branchRef = branchRef.substr(5);
+        headFile.close();
+
+        ifstream branchFile(".mygit/" + branchRef);
+        string latestCommit;
+        getline(branchFile, latestCommit);
+        if (latestCommit == "")
+        {
+            cout << "No commits till now\n";
+            return 0;
+        }
+        displaycommit(latestCommit);
+    }
+    else if (command == "checkout")
+    {
+        if (argc > 3)
+        {
+            cout << "ERR: Too many arguments\n";
+            return 1;
+        }
+        if (argc < 3)
+        {
+            cout << "ERR: Too few arguments\n";
+            return 1;
+        }
+        string commitsha = argv[2];
+        checkout(commitsha);
     }
     else
     {
