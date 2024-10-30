@@ -19,7 +19,15 @@ struct TreeEntry
     string filehash;
 };
 
-struct metadata
+struct User
+{
+    string name;
+    string email;
+};
+
+User user = {"aarathib", "aarathy00@gmail.com"};
+
+struct Metadata
 {
     string sha;
     string filemod;
@@ -318,7 +326,7 @@ string writeBlob(path &filepath)
     return sha;
 }
 
-int writeObject(string &object, path dirpath)
+int writeObject(string &object)
 {
     string hash = hashBlob(object);
     // cout << "tree hash: " << hash << " dirpath: " << dirpath << '\n';
@@ -370,7 +378,7 @@ int writeObject(string &object, path dirpath)
     return 0;
 }
 
-string writeTree(path &directoryPath)
+string writeTree(path directoryPath)
 {
     vector<string> entries;
 
@@ -403,7 +411,7 @@ string writeTree(path &directoryPath)
         treeData += entry;
     }
 
-    writeObject(treeData, directoryPath);
+    writeObject(treeData);
     return hashBlob(treeData);
 }
 
@@ -453,6 +461,40 @@ string decompressData(const string &compressedData)
 
     inflateEnd(&inflateStream);
     return decompressedData;
+}
+unordered_map<string, TreeEntry> parseTreeDataMap(string treeData)
+{
+    unordered_map<string, TreeEntry> newTreeMap;
+    ssize_t pos = 0;
+    size_t stringEnd = treeData.find('\0', pos);
+    stringstream ss;
+    ss << treeData.substr(0, stringEnd);
+    string objtype, objsize;
+    ss >> objtype >> objsize;
+    ss.clear();
+    if (objtype != "tree")
+    {
+        cout << "Not a tree object\n";
+        return newTreeMap;
+    }
+
+    pos = stringEnd + 1;
+    while (pos < treeData.size())
+    {
+        TreeEntry entry;
+        stringEnd = treeData.find('\0', pos);
+        ss << treeData.substr(pos, stringEnd - pos);
+        ss >> entry.filemod >> entry.filename;
+        ss.clear();
+        pos = stringEnd + 1;
+
+        entry.filehash.clear();
+        entry.filehash = treeData.substr(pos, 40);
+        pos += 40;
+        entry.filetype = (entry.filemod == "100644" ? "blob" : "tree");
+        newTreeMap[entry.filename] = entry;
+    }
+    return newTreeMap;
 }
 
 vector<TreeEntry> parseTreeData(string treeData)
@@ -511,6 +553,32 @@ void displayTree(vector<TreeEntry> &entries, bool nameonly)
     }
 }
 
+unordered_map<string, TreeEntry> getTreeData(string tree_sha)
+{
+    string dir = tree_sha.substr(0, 2);
+    string file = tree_sha.substr(2);
+    string objPath = ".mygit/objects/" + dir + '/' + file;
+    ifstream inFile(objPath, ios::binary);
+    if (!inFile)
+    {
+        cerr << "Tree object not found\n";
+        return {};
+    }
+
+    stringstream buffer;
+    buffer << inFile.rdbuf();
+    string compressedData = buffer.str();
+
+    string treeData = decompressData(compressedData);
+    if (treeData.empty())
+    {
+        cerr << "ERR: Failed to decompress tree object\n";
+        return {};
+    }
+
+    return parseTreeDataMap(treeData);
+}
+
 int lstree(string tree_sha, bool nameonly)
 {
     string dir = tree_sha.substr(0, 2);
@@ -528,6 +596,7 @@ int lstree(string tree_sha, bool nameonly)
     string compressedData = buffer.str();
 
     string treeData = decompressData(compressedData);
+    cout << "treedata " << treeData << '\n';
     if (treeData.empty())
     {
         cerr << "ERR: Failed to decompress tree object\n";
@@ -544,30 +613,19 @@ int lstree(string tree_sha, bool nameonly)
     return 0;
 }
 
-void processFile(path &filepath, unordered_map<string, metadata> &indexmap)
+void processFile(path &filepath, unordered_map<string, Metadata> &indexmap)
 {
     string sha = hashObject(filepath, false);
     indexmap[filepath.string()] = {sha, "blob"};
 }
 
-void processDirectory(path &dirpath, unordered_map<string, metadata> &indexmap)
+void processDirectory(path &dirpath, unordered_map<string, Metadata> &indexmap)
 {
-    for (const auto entry : directory_iterator(dirpath))
-    {
-        path filepath = entry.path();
-        if (is_regular_file(entry))
-        {
-            processFile(filepath, indexmap);
-        }
-        else if (is_directory(entry))
-        {
-            indexmap[entry.path()] = {"", "tree"};
-            processDirectory(filepath, indexmap);
-        }
-    }
+    string sha = writeTree(dirpath);
+    indexmap[dirpath.string()] = {sha, "blob"};
 }
 
-void detecteDeletions(unordered_map<string, metadata> &indexMap)
+void detecteDeletions(unordered_map<string, Metadata> &indexMap)
 {
     for (auto it = indexMap.begin(); it != indexMap.end();)
     {
@@ -584,7 +642,7 @@ void detecteDeletions(unordered_map<string, metadata> &indexMap)
     }
 }
 
-void saveIndex(const unordered_map<string, metadata> &indexMap)
+void saveIndex(const unordered_map<string, Metadata> &indexMap)
 {
     ofstream indexFile(".mygit/index", ios::trunc);
     for (const auto &[path, entry] : indexMap)
@@ -595,7 +653,7 @@ void saveIndex(const unordered_map<string, metadata> &indexMap)
 
 void add(vector<string> &files)
 {
-    unordered_map<string, metadata> indexEntries;
+    unordered_map<string, Metadata> indexEntries;
     ifstream indexFile(".mygit/index");
     string line;
     while (getline(indexFile, line))
@@ -614,6 +672,8 @@ void add(vector<string> &files)
         {
             if (is_directory(filepath))
             {
+                if (filepath.filename() == ".mygit")
+                    continue;
                 processDirectory(filepath, indexEntries);
             }
             else if (is_regular_file(filepath))
@@ -623,6 +683,7 @@ void add(vector<string> &files)
         }
         else
         {
+            // TODO: raise as errror
             cerr << "ERR: File not found " << file << '\n';
             continue;
         }
@@ -632,12 +693,114 @@ void add(vector<string> &files)
     }
 
     ofstream indexFileOut(".mygit/index", ios::trunc);
-    for (const auto &[filepath, metadata] : indexEntries)
+    for (const auto &[filepath, Metadata] : indexEntries)
     {
-        indexFileOut << metadata.filemod << " " << metadata.sha << " " << filepath << '\n';
+        indexFileOut << Metadata.filemod << " " << Metadata.sha << " " << filepath << '\n';
     }
 
     indexFileOut.close();
+}
+
+unordered_map<string, string> updateTree(unordered_map<string, TreeEntry> &entries)
+{
+    // name:data
+    unordered_map<string, string> updated_treedata;
+    for (auto &[name, entry] : entries)
+    {
+        path filepath(name);
+        if (exists(filepath))
+        {
+            string entryData = entry.filemod + " " + entry.filename + '\0' + entry.filehash;
+            updated_treedata[entry.filename] = entryData;
+        }
+    }
+
+    ifstream indexFile(".mygit/index");
+    if (!indexFile)
+    {
+        cerr << "ERR: Index file does not exist\n";
+        return;
+    }
+    string line;
+    while (getline(indexFile, line))
+    {
+        istringstream lineStream(line);
+        string name, type, sha;
+
+        lineStream >> type >> sha >> name;
+
+        if (type == "blob")
+        {
+            string entryData = "100644 " + name + '\0' + sha;
+            updated_treedata[name] = entryData;
+        }
+        else if (type == "tree")
+        {
+            string entryData = "040000 " + name + '\0' + sha;
+            updated_treedata[name] = entryData;
+        }
+    }
+
+    indexFile.close();
+    return updated_treedata;
+}
+
+string getCurrentTimestamp()
+{
+    time_t t = time(nullptr);
+    char buf[100];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", localtime(&t));
+    return buf;
+}
+
+void commit(string &message)
+{
+    ifstream headFile(".mygit/HEAD");
+    string branchRef;
+    if (!headFile)
+    {
+        branchRef = "refs/heads/main";
+        ofstream headInit(".mygit/HEAD");
+        headInit << "ref: " << branchRef;
+        headInit.close();
+    }
+    else
+    {
+        getline(headFile, branchRef);
+        branchRef = branchRef.substr(5);
+    }
+    headFile.close();
+
+    bool isFirstCommit = !exists(".mygit/" + branchRef);
+    string treesha, parentSHA;
+    if (isFirstCommit)
+    {
+        treesha = writeTree(current_path());
+    }
+    else
+    {
+        ifstream branchFile(".mygit/" + branchRef);
+        getline(branchFile, parentSHA);
+        cout << "tressha " << parentSHA;
+        unordered_map<string, TreeEntry> entries = getTreeData(parentSHA);
+        unordered_map<string, string> updatedTreeData = updateTree(entries);
+
+        string treeData;
+        for (auto &[file, entrydata] : updatedTreeData)
+        {
+            treeData += entrydata;
+        }
+
+        writeObject(treeData);
+        treesha = hashBlob(treeData);
+    }
+    string timestamp = getCurrentTimestamp();
+    cout << "tressha " << treesha;
+    string commitData = user.name + '\0' +
+                        user.email + '\0' + treesha + '\0' +
+                        parentSHA + '\0' +
+                        timestamp + '\0' +
+                        message;
 }
 
 int main(int argc, char *argv[])
@@ -732,6 +895,7 @@ int main(int argc, char *argv[])
         }
         lstree(tree_sha, nameonly);
     }
+    // todo: arg coubt
     else if (command == "add")
     {
         vector<string> files;
@@ -740,6 +904,16 @@ int main(int argc, char *argv[])
             files.push_back(argv[i]);
         }
         add(files);
+        // todo: arg coubt
+    }
+    else if (command == "commit")
+    {
+        string message = "Default commit message";
+        if (strcmp(argv[2], "-m") == 0)
+        {
+            message = argv[3];
+        }
+        commit(message);
     }
     else
     {
